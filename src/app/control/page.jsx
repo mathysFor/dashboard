@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 // Options pour les niveaux de difficulté
 const DIFFICULTY_OPTIONS = [
   { value: "debutant", label: "Débutant" },
@@ -67,7 +67,7 @@ import {
 import { db } from "../../../lib/firebase";
 import AuthGuard from "../../../lib/AuthGuard";
 
-export default function ControlPage() {
+function ControlPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const sessionId = searchParams.get("sessionId");
@@ -943,5 +943,19 @@ export default function ControlPage() {
       )}
     </main>
     </AuthGuard>
+  );
+}
+
+export default function ControlPage() {
+  return (
+    <Suspense fallback={
+      <AuthGuard>
+        <main className="space-y-4">
+          <p className="text-sm text-slate-400">Chargement…</p>
+        </main>
+      </AuthGuard>
+    }>
+      <ControlPageContent />
+    </Suspense>
   );
 }
