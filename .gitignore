@@ -40,6 +40,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# 1. Ajoute dans .gitignore
-echo "service-account.json" >> .gitignore
-
+# secrets
+service-account.json
