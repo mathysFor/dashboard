@@ -2,7 +2,7 @@ import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
 
 export default async function ProfilePage({ params }) {
-  const headersList = headers();
+  const headersList = await headers();
   const userAgent = headersList.get('user-agent') || '';
 
   // Détection de la plateforme
