@@ -81,6 +81,7 @@ function ControlPageContent() {
   const [formOpen, setFormOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newOrder, setNewOrder] = useState("");
+  const [newPosition, setNewPosition] = useState("end"); // "start", "end", ou un ID d'exercice
   const [newDescription, setNewDescription] = useState("");
   const [newDifficulty, setNewDifficulty] = useState("debutant");
   const [newTags, setNewTags] = useState([]);
@@ -164,14 +165,17 @@ function ControlPageContent() {
           const resolved = await Promise.all(promises);
           exoData = resolved.filter(Boolean);
 
-          // on tri d'abord par la position dans le tableau de la séance,
-          // puis par le champ "order" s'il existe
+          // On trie par le champ "order" - les exercices sans ordre restent à leur position d'origine
+          // On utilise Infinity pour les exercices sans ordre afin qu'ils soient à la fin
           exoData.sort((a, b) => {
-            const ai = a._seanceIndex ?? 0;
-            const bi = b._seanceIndex ?? 0;
-            if (ai !== bi) return ai - bi;
-            return (a.order ?? 0) - (b.order ?? 0);
+            const orderA = typeof a.order === "number" ? a.order : Infinity;
+            const orderB = typeof b.order === "number" ? b.order : Infinity;
+            if (orderA !== orderB) return orderA - orderB;
+            // Si les deux n'ont pas d'ordre, on garde l'ordre du tableau seanceExercises
+            return (a._seanceIndex ?? 0) - (b._seanceIndex ?? 0);
           });
+          
+          console.log("📋 Exercices triés:", exoData.map(e => ({ titre: e.titre, order: e.order })));
         } else {
           // Cas 2 : fallback sur l'ancien système basé sur le champ sessionId
           const exercisesRef = collection(db, "exercises");
@@ -200,26 +204,86 @@ function ControlPageContent() {
     fetchData();
   }, [sessionId]);
 
+  // Calcule l'ordre en fonction de la position choisie
+  function computeOrderFromPosition(position) {
+    if (exercises.length === 0) {
+      return 1;
+    }
+
+    // On assigne un ordre temporaire aux exercices qui n'en ont pas
+    // basé sur leur index dans le tableau actuel (multiplié par 10 pour laisser de la place)
+    const exercisesWithOrder = exercises.map((exo, idx) => ({
+      ...exo,
+      order: typeof exo.order === "number" ? exo.order : (idx + 1) * 10
+    }));
+    
+    const sortedExercises = [...exercisesWithOrder].sort((a, b) => a.order - b.order);
+    
+    if (position === "start") {
+      // Avant le premier exercice
+      const firstOrder = sortedExercises[0]?.order ?? 10;
+      return firstOrder - 10; // Utiliser -10, -20, etc. pour être sûr d'être avant
+    }
+    
+    if (position === "end") {
+      // Après le dernier exercice
+      const lastOrder = sortedExercises[sortedExercises.length - 1]?.order ?? 0;
+      return lastOrder + 10; // Ajouter 10 pour laisser de la marge
+    }
+    
+    // Après un exercice spécifique
+    const afterExoIndex = sortedExercises.findIndex((exo) => exo.id === position);
+    if (afterExoIndex === -1) {
+      // Fallback à la fin
+      const lastOrder = sortedExercises[sortedExercises.length - 1]?.order ?? 0;
+      return lastOrder + 10;
+    }
+    
+    const afterExo = sortedExercises[afterExoIndex];
+    const nextExo = sortedExercises[afterExoIndex + 1];
+    
+    if (!nextExo) {
+      // Pas d'exercice après, on ajoute +10
+      return afterExo.order + 10;
+    }
+    
+    // Moyenne entre les deux
+    return (afterExo.order + nextExo.order) / 2;
+  }
+
   async function handleCreateExercise(e) {
     e.preventDefault();
+    console.log("🚀 [handleCreateExercise] FONCTION APPELÉE !");
+    
     setSaveError(null);
     setUploadError(null);
 
     if (!sessionId) {
+      console.log("❌ sessionId manquant");
       setSaveError("Séance introuvable (sessionId manquant).");
       return;
     }
 
     if (!newTitle.trim()) {
+      console.log("❌ titre vide");
       setSaveError("Le titre est obligatoire.");
       return;
     }
 
-    const parsedOrder = Number(newOrder);
-    if (Number.isNaN(parsedOrder)) {
-      setSaveError("L’ordre doit être un nombre (ex: 1, 2, 3…).");
-      return;
+    // Calculer l'ordre automatiquement si pas de valeur manuelle
+    let parsedOrder;
+    if (newOrder.trim() !== "") {
+      parsedOrder = Number(newOrder);
+      if (Number.isNaN(parsedOrder)) {
+        console.log("❌ ordre invalide");
+        setSaveError("L'ordre doit être un nombre (ex: 1, 2, 3…).");
+        return;
+      }
+    } else {
+      parsedOrder = computeOrderFromPosition(newPosition);
     }
+    
+    console.log("✅ [ControlPage] Création exercice avec ordre:", parsedOrder, "position:", newPosition);
 
     try {
       setSaving(true);
@@ -288,9 +352,9 @@ function ControlPageContent() {
         }
       }
 
-      // 2) Création du doc Firestore une fois l’upload (si présent) terminé
+      // 2) Création du doc Firestore une fois l'upload (si présent) terminé
       const exercisesRef = collection(db, "exercises");
-      const docRef = await addDoc(exercisesRef, {
+      const newExerciseData = {
         sessionId,
         levelId: session?.levelId || null,
         titre: newTitle.trim(),
@@ -308,14 +372,43 @@ function ControlPageContent() {
         thumbnail: thumbnail,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      });
+      };
+      
+      console.log("📝 [ControlPage] Données à sauvegarder:", JSON.stringify(newExerciseData, null, 2));
+      console.log("📝 [ControlPage] ORDRE =", parsedOrder, "TYPE =", typeof parsedOrder);
+      
+      const docRef = await addDoc(exercisesRef, newExerciseData);
+      
+      console.log("✅✅✅ [ControlPage] EXERCICE CRÉÉ AVEC SUCCÈS !");
+      console.log("✅ ID:", docRef.id);
+      console.log("✅ ORDRE SAUVEGARDÉ:", parsedOrder);
+      alert("Exercice créé avec ordre: " + parsedOrder);
 
-      // 2bis) Ajoute l'ID de l'exercice dans le tableau seanceExercises de la séance
+      // 2bis) Ajoute l'ID de l'exercice dans le tableau seanceExercises à la bonne position
       try {
         const seanceRef = doc(db, "seances", sessionId);
+        const seanceSnap = await getDoc(seanceRef);
+        const currentExercises = seanceSnap.data()?.seanceExercises || [];
+        
+        // Créer une liste d'exercices avec leur ordre pour trier
+        const allExercisesWithOrder = [
+          ...exercises.map(e => ({ id: e.id, order: typeof e.order === "number" ? e.order : Infinity })),
+          { id: docRef.id, order: parsedOrder }
+        ];
+        
+        // Trier par ordre
+        allExercisesWithOrder.sort((a, b) => a.order - b.order);
+        
+        // Extraire juste les IDs dans le bon ordre
+        const sortedIds = allExercisesWithOrder.map(e => e.id);
+        
+        console.log("📋 Nouveau tableau seanceExercises trié:", sortedIds);
+        
         await updateDoc(seanceRef, {
-          seanceExercises: arrayUnion(docRef.id),
+          seanceExercises: sortedIds,
         });
+        
+        console.log("✅ seanceExercises mis à jour !");
       } catch (err) {
         console.error("[ControlPage] Error updating seanceExercises", err);
         // On n'empêche pas la création de l'exercice si cette mise à jour échoue
@@ -354,8 +447,9 @@ function ControlPageContent() {
       setVideoFile(null);
       setFormOpen(false);
     } catch (err) {
-      console.error("[ControlPage] Error creating exercise", err);
-      setSaveError(err?.message || "Erreur lors de la création de l’exercice.");
+      console.error("❌❌❌ [ControlPage] ERREUR lors de la création:", err);
+      alert("ERREUR: " + (err?.message || "Erreur inconnue"));
+      setSaveError(err?.message || "Erreur lors de la création de l'exercice.");
     } finally {
       setSaving(false);
     }
@@ -411,27 +505,111 @@ function ControlPageContent() {
             Ajouter un nouvel exercice
           </h3>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="space-y-1 sm:col-span-2">
-              <label className="text-xs text-slate-400">Titre</label>
-              <input
-                type="text"
-                value={newTitle}
-                onChange={(e) => setNewTitle(e.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
-                placeholder="Ex: Exercice 1 – Appuis extérieurs"
-              />
-            </div>
+          <div className="space-y-1">
+            <label className="text-xs text-slate-400">Titre</label>
+            <input
+              type="text"
+              value={newTitle}
+              onChange={(e) => setNewTitle(e.target.value)}
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
+              placeholder="Ex: Exercice 1 – Appuis extérieurs"
+            />
+          </div>
 
-            <div className="space-y-1">
-              <label className="text-xs text-slate-400">Ordre</label>
-              <input
-                type="number"
-                value={newOrder}
-                onChange={(e) => setNewOrder(e.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
-                placeholder="Ex: 1"
-              />
+          <div className="space-y-2">
+            <label className="text-xs text-slate-400">Position dans la séance</label>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setNewPosition("start");
+                  setNewOrder("");
+                }}
+                className={`rounded-lg px-3 py-2 text-xs font-medium transition-all ${
+                  newPosition === "start"
+                    ? "bg-sky-500 text-slate-950"
+                    : "border border-slate-700 text-slate-300 hover:bg-slate-800"
+                }`}
+              >
+                🔼 Au début
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setNewPosition("end");
+                  setNewOrder("");
+                }}
+                className={`rounded-lg px-3 py-2 text-xs font-medium transition-all ${
+                  newPosition === "end"
+                    ? "bg-sky-500 text-slate-950"
+                    : "border border-slate-700 text-slate-300 hover:bg-slate-800"
+                }`}
+              >
+                🔽 À la fin
+              </button>
+              {exercises.length > 0 && (
+                <select
+                  value={newPosition !== "start" && newPosition !== "end" ? newPosition : ""}
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      setNewPosition(e.target.value);
+                      setNewOrder("");
+                    }
+                  }}
+                  className={`rounded-lg px-3 py-2 text-xs font-medium transition-all ${
+                    newPosition !== "start" && newPosition !== "end" && newPosition !== ""
+                      ? "bg-sky-500 text-slate-950"
+                      : "border border-slate-700 bg-slate-950 text-slate-300"
+                  }`}
+                >
+                  <option value="">↳ Après un exercice…</option>
+                  {[...exercises].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map((exo) => (
+                    <option key={exo.id} value={exo.id}>
+                      Après : {exo.ordre ?? exo.order} – {exo.titre || "Sans titre"}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-500">
+              {newPosition === "start" && "L'exercice sera placé avant tous les autres."}
+              {newPosition === "end" && "L'exercice sera placé après le dernier."}
+              {newPosition !== "start" && newPosition !== "end" && newPosition && (
+                <>L&apos;exercice sera inséré après l&apos;exercice sélectionné.</>
+              )}
+              {!newPosition && "Choisis où placer l'exercice dans la séance."}
+            </p>
+            
+            {/* Option avancée : ordre manuel */}
+            <details className="pt-1">
+              <summary className="cursor-pointer text-[11px] text-slate-500 hover:text-slate-400">
+                ⚙️ Définir un ordre personnalisé (avancé)
+              </summary>
+              <div className="mt-2 space-y-1">
+                <input
+                  type="number"
+                  step="0.1"
+                  value={newOrder}
+                  onChange={(e) => setNewOrder(e.target.value)}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
+                  placeholder="Ex: 1.5 pour insérer entre 1 et 2"
+                />
+                <p className="text-[10px] text-slate-600">
+                  Si renseigné, cette valeur remplace la position automatique.
+                </p>
+              </div>
+            </details>
+            
+            {/* Aperçu de l'ordre calculé */}
+            <div className="mt-2 rounded-lg bg-sky-500/10 border border-sky-500/20 px-3 py-2">
+              <p className="text-xs text-sky-400">
+                📍 Ordre qui sera utilisé : <strong className="font-mono">{
+                  newOrder.trim() !== "" 
+                    ? Number(newOrder) 
+                    : computeOrderFromPosition(newPosition)
+                }</strong>
+                {newOrder.trim() !== "" && " (personnalisé)"}
+              </p>
             </div>
           </div>
 
@@ -566,90 +744,210 @@ function ControlPageContent() {
       )}
 
       {!loading && !error && exercises.length > 0 && (
-        <div className="space-y-3">
-          {exercises.map((exo) => (
-            <div
-              key={exo.id}
-              className="flex flex-col gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-sm"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <p className="text-[11px] uppercase tracking-wide text-slate-400">
-                    Exercice {exo.order ?? ""}
-                  </p>
-                  <h3 className="text-sm font-semibold text-slate-50">
-                    {exo.titre || "Exercice sans titre"}
-                  </h3>
-                  {exo.difficulty && (
-                    <p className="mt-0.5 text-[11px] text-slate-400">
-                      Niveau :{" "}
-                      {
-                        (DIFFICULTY_OPTIONS.find(
-                          (opt) => opt.value === exo.difficulty
-                        ) || { label: exo.difficulty }
-                      ).label
-                      }
-                    </p>
-                  )}
+        <div className="space-y-2">
+          {/* En-tête de liste */}
+          <div className="flex items-center justify-between px-2 pb-2">
+            <p className="text-xs text-slate-500">
+              {exercises.length} exercice{exercises.length > 1 ? "s" : ""} dans cette séance
+            </p>
+          </div>
+
+          {exercises.map((exo, index) => {
+            const sortedExercises = [...exercises].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+            const currentIndex = sortedExercises.findIndex((e) => e.id === exo.id);
+            const isFirst = currentIndex === 0;
+            const isLast = currentIndex === sortedExercises.length - 1;
+
+            return (
+              <div
+                key={exo.id}
+                className="group flex gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3 transition-all hover:border-slate-700 hover:bg-slate-900/80"
+              >
+                {/* Numéro d'ordre + contrôles */}
+                <div className="flex flex-col items-center gap-1">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-sky-500/20 to-sky-600/10 text-lg font-bold text-sky-400">
+                    {currentIndex + 1}
+                  </div>
+                  <div className="flex flex-col gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                    <button
+                      type="button"
+                      disabled={isFirst}
+                      onClick={async () => {
+                        if (isFirst) return;
+                        const prevExo = sortedExercises[currentIndex - 1];
+                        const newOrder = (typeof prevExo.order === "number" ? prevExo.order : currentIndex * 10) - 5;
+                        try {
+                          const exoRef = doc(db, "exercises", exo.id);
+                          await updateDoc(exoRef, { order: newOrder, updatedAt: serverTimestamp() });
+                          
+                          // Mettre à jour la liste locale
+                          const updatedList = exercises
+                            .map((e) => (e.id === exo.id ? { ...e, order: newOrder } : e))
+                            .sort((a, b) => {
+                              const orderA = typeof a.order === "number" ? a.order : Infinity;
+                              const orderB = typeof b.order === "number" ? b.order : Infinity;
+                              return orderA - orderB;
+                            });
+                          
+                          setExercises(updatedList);
+                          
+                          // Mettre à jour seanceExercises dans Firestore
+                          const sortedIds = updatedList.map(e => e.id);
+                          const seanceRef = doc(db, "seances", sessionId);
+                          await updateDoc(seanceRef, { seanceExercises: sortedIds });
+                          console.log("✅ Monté - seanceExercises mis à jour:", sortedIds);
+                        } catch (err) {
+                          console.error("Erreur lors du déplacement", err);
+                        }
+                      }}
+                      className="rounded p-0.5 text-slate-500 hover:bg-slate-800 hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-30"
+                      title="Monter"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isLast}
+                      onClick={async () => {
+                        if (isLast) return;
+                        const nextExo = sortedExercises[currentIndex + 1];
+                        const newOrder = (typeof nextExo.order === "number" ? nextExo.order : (currentIndex + 2) * 10) + 5;
+                        try {
+                          const exoRef = doc(db, "exercises", exo.id);
+                          await updateDoc(exoRef, { order: newOrder, updatedAt: serverTimestamp() });
+                          
+                          // Mettre à jour la liste locale
+                          const updatedList = exercises
+                            .map((e) => (e.id === exo.id ? { ...e, order: newOrder } : e))
+                            .sort((a, b) => {
+                              const orderA = typeof a.order === "number" ? a.order : Infinity;
+                              const orderB = typeof b.order === "number" ? b.order : Infinity;
+                              return orderA - orderB;
+                            });
+                          
+                          setExercises(updatedList);
+                          
+                          // Mettre à jour seanceExercises dans Firestore
+                          const sortedIds = updatedList.map(e => e.id);
+                          const seanceRef = doc(db, "seances", sessionId);
+                          await updateDoc(seanceRef, { seanceExercises: sortedIds });
+                          console.log("✅ Descendu - seanceExercises mis à jour:", sortedIds);
+                        } catch (err) {
+                          console.error("Erreur lors du déplacement", err);
+                        }
+                      }}
+                      className="rounded p-0.5 text-slate-500 hover:bg-slate-800 hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-30"
+                      title="Descendre"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Contenu principal */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="truncate text-sm font-semibold text-slate-50">
+                        {exo.titre || "Exercice sans titre"}
+                      </h3>
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        {exo.difficulty && (
+                          <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-medium ${
+                            exo.difficulty === "debutant" ? "bg-green-500/10 text-green-400 border border-green-500/20" :
+                            exo.difficulty === "intermediaire" ? "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20" :
+                            exo.difficulty === "avance" ? "bg-red-500/10 text-red-400 border border-red-500/20" :
+                            "bg-purple-500/10 text-purple-400 border border-purple-500/20"
+                          }`}>
+                            {(DIFFICULTY_OPTIONS.find((opt) => opt.value === exo.difficulty) || { label: exo.difficulty }).label}
+                          </span>
+                        )}
+                        {exo.videoUrl || exo.urlvideo ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400">
+                            <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
+                              <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                            </svg>
+                            Vidéo
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[10px] text-slate-600">
+                            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                            Sans vidéo
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Actions */}
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-lg border border-slate-700 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition-colors hover:border-sky-500/50 hover:bg-sky-500/10 hover:text-sky-400"
+                      onClick={() => {
+                        setEditError(null);
+                        setEditUploadError(null);
+                        setEditingExo(exo);
+                        setEditTitle(exo.titre || "");
+                        setEditOrder(typeof exo.order === "number" ? String(exo.order) : "");
+                        setEditDescription(exo.description || "");
+                        setEditDifficulty(exo.difficulty || "debutant");
+                        setEditTags(Array.isArray(exo.tags) ? exo.tags : []);
+                        setEditVideoFile(null);
+                      }}
+                    >
+                      Éditer
+                    </button>
+                  </div>
+
+                  {/* Tags */}
                   {Array.isArray(exo.tags) && exo.tags.length > 0 && (
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {exo.tags.map((tag) => {
-                        const meta =
-                          TAG_OPTIONS.find((t) => t.value === tag) || null;
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {exo.tags.slice(0, 4).map((tag) => {
+                        const meta = TAG_OPTIONS.find((t) => t.value === tag) || null;
                         return (
                           <span
                             key={tag}
-                            className="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] text-slate-200"
+                            className="rounded-full bg-slate-800/80 px-2 py-0.5 text-[10px] text-slate-400"
                           >
                             {meta ? meta.label : tag}
                           </span>
                         );
                       })}
+                      {exo.tags.length > 4 && (
+                        <span className="rounded-full bg-slate-800/50 px-2 py-0.5 text-[10px] text-slate-500">
+                          +{exo.tags.length - 4}
+                        </span>
+                      )}
                     </div>
                   )}
+
+                  {/* Description (tronquée) */}
+                  {exo.description && (
+                    <p className="mt-2 line-clamp-2 text-xs text-slate-500">
+                      {exo.description}
+                    </p>
+                  )}
+
+                  {/* Footer stats */}
+                  <div className="mt-2 flex items-center gap-3 text-[10px] text-slate-600">
+                    <span>❤️ {exo.likesCount ?? 0}</span>
+                    <span>💬 {exo.commentsCount ?? 0}</span>
+                    {exo.durationSeconds && (
+                      <span>⏱️ {Math.round(exo.durationSeconds / 60)} min</span>
+                    )}
+                    <span className="ml-auto font-mono text-slate-700">
+                      ordre: {exo.order ?? "—"}
+                    </span>
+                  </div>
                 </div>
-                {exo.durationSeconds && (
-                  <span className="text-[11px] text-slate-400">
-                    {(exo.durationSeconds / 60).toFixed(1)} min
-                  </span>
-                )}
               </div>
-
-              {exo.description && (
-                <p className="text-xs text-slate-400 whitespace-pre-line">
-                  {exo.description}
-                </p>
-              )}
-
-              <div className="flex items-center justify-between gap-3 pt-1">
-                <div className="text-[11px] text-slate-500">
-                  {exo.likesCount ?? 0} likes · {exo.commentsCount ?? 0} coms
-                </div>
-
-                <button
-                  type="button"
-                  className="text-[11px] font-medium text-sky-400 hover:underline"
-                  onClick={() => {
-                    setEditError(null);
-                    setEditUploadError(null);
-                    setEditingExo(exo);
-                    setEditTitle(exo.titre || "");
-                    setEditOrder(
-                      typeof exo.order === "number" ? String(exo.order) : ""
-                    );
-                    setEditDescription(exo.description || "");
-                    setEditDifficulty(exo.difficulty || "debutant");
-                    setEditTags(
-                      Array.isArray(exo.tags) ? exo.tags : []
-                    );
-                    setEditVideoFile(null);
-                  }}
-                >
-                  Éditer l&apos;exercice
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -764,6 +1062,32 @@ function ControlPageContent() {
                     updatedAt: serverTimestamp(),
                   });
 
+                  // Mettre à jour le tableau seanceExercises avec le nouvel ordre
+                  try {
+                    const updatedExercises = exercises.map((exo) =>
+                      exo.id === editingExo.id
+                        ? { ...exo, order: parsedOrder }
+                        : exo
+                    );
+                    
+                    // Trier par ordre
+                    updatedExercises.sort((a, b) => {
+                      const orderA = typeof a.order === "number" ? a.order : Infinity;
+                      const orderB = typeof b.order === "number" ? b.order : Infinity;
+                      return orderA - orderB;
+                    });
+                    
+                    const sortedIds = updatedExercises.map(e => e.id);
+                    
+                    const seanceRef = doc(db, "seances", sessionId);
+                    await updateDoc(seanceRef, {
+                      seanceExercises: sortedIds,
+                    });
+                    console.log("✅ seanceExercises réordonné après édition:", sortedIds);
+                  } catch (err) {
+                    console.error("Erreur lors de la réorganisation de seanceExercises:", err);
+                  }
+
                   // mettre à jour la liste locale
                   setExercises((prev) =>
                     prev
@@ -783,7 +1107,11 @@ function ControlPageContent() {
                             }
                           : exo
                       )
-                      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+                      .sort((a, b) => {
+                        const orderA = typeof a.order === "number" ? a.order : Infinity;
+                        const orderB = typeof b.order === "number" ? b.order : Infinity;
+                        return orderA - orderB;
+                      })
                   );
 
                   setEditVideoFile(null);
@@ -840,14 +1168,43 @@ function ControlPageContent() {
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs text-slate-400">Ordre</label>
+              <div className="space-y-2">
+                <label className="text-xs text-slate-400">Position / Ordre</label>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const sorted = [...exercises].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+                      const firstOrder = sorted[0]?.order ?? 1;
+                      setEditOrder(String(firstOrder - 1));
+                    }}
+                    className="rounded-lg border border-slate-700 px-3 py-1.5 text-[11px] text-slate-300 hover:bg-slate-800"
+                  >
+                    🔼 Mettre au début
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const sorted = [...exercises].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+                      const lastOrder = sorted[sorted.length - 1]?.order ?? 0;
+                      setEditOrder(String(lastOrder + 1));
+                    }}
+                    className="rounded-lg border border-slate-700 px-3 py-1.5 text-[11px] text-slate-300 hover:bg-slate-800"
+                  >
+                    🔽 Mettre à la fin
+                  </button>
+                </div>
                 <input
                   type="number"
+                  step="0.1"
                   value={editOrder}
                   onChange={(e) => setEditOrder(e.target.value)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
+                  placeholder="Ordre numérique (ex: 1, 2, 1.5…)"
                 />
+                <p className="text-[10px] text-slate-600">
+                  Tu peux utiliser des décimales (ex: 1.5) pour insérer entre deux exercices.
+                </p>
               </div>
 
               <div className="space-y-1">
