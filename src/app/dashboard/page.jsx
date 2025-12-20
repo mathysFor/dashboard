@@ -325,13 +325,13 @@ useEffect(() => {
 
   return (
     <AuthGuard>
-      <div className="min-h-screen bg-slate-950 text-slate-50">
+      <div className="text-slate-50">
       <div className="mx-auto flex max-w-7xl flex-col gap-8 px-4 py-8 lg:px-8">
         {/* HEADER */}
         <header className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
-              WinterAcademy – Admin Dashboard
+              Stats & Users
             </h1>
             <p className="mt-1 text-sm text-slate-400">
               Vue globale de la base Firestore + contrôle fin d&apos;un user.
