@@ -14,6 +14,7 @@ export default function DashboardLayout({ children }) {
     { href: "/dashboard", label: "Stats & Users", icon: ChartIcon },
     { href: "/dashboard/videos", label: "Videos", icon: VideoIcon },
     { href: "/dashboard/messagerie", label: "Messagerie", icon: MessageIcon },
+    { href: "/dashboard/challenges/relaunch", label: "Relance Challenges", icon: ReloadIcon },
   ];
 
   return (
@@ -102,6 +103,25 @@ function MessageIcon({ className }) {
       strokeLinejoin="round"
     >
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+function ReloadIcon({ className }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M23 4V10H17" />
+      <path d="M1 20V14H7" />
+      <path d="M3.51 9A9 9 0 0 1 20.49 4.61L23 7" />
+      <path d="M20.49 15A9 9 0 0 1 3.51 19.39L1 17" />
     </svg>
   );
 }

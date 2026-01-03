@@ -11,8 +11,11 @@ import {
   addDoc,
   updateDoc,
   serverTimestamp,
+  getDocs,
+  getDoc,
+  limit,
 } from "firebase/firestore";
-import { db } from "../../../../lib/firebase";
+import { db, auth } from "../../../../lib/firebase";
 import AuthGuard from "../../../../lib/AuthGuard";
 
 // Hardcoded admin user ID
@@ -39,6 +42,12 @@ export default function MessageriePage() {
 
   // Mobile view state
   const [showChat, setShowChat] = useState(false);
+
+  // Search
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [showSearchResults, setShowSearchResults] = useState(false);
 
   // Toast
   const [toast, setToast] = useState({ show: false, message: "", type: "success" });
@@ -129,6 +138,222 @@ export default function MessageriePage() {
   }, [selectedConversation?.id]);
 
   // ============================================
+  // Get other user from conversation
+  // ============================================
+  const getOtherUser = useCallback((conversation) => {
+    if (!conversation) return null;
+
+    // Try members array first
+    if (Array.isArray(conversation.members)) {
+      const other = conversation.members.find((m) => m?.id !== ADMIN_USER_ID);
+      if (other) return other;
+    }
+
+    // Try participantsMap
+    if (conversation.participantsMap) {
+      const otherKey = Object.keys(conversation.participantsMap).find(
+        (key) => key !== ADMIN_USER_ID
+      );
+      if (otherKey) {
+        const p = conversation.participantsMap[otherKey];
+        return { id: otherKey, name: p.name, imageURL: p.photoURL };
+      }
+    }
+
+    // Fallback to memberIds
+    if (Array.isArray(conversation.memberIds)) {
+      const otherId = conversation.memberIds.find((id) => id !== ADMIN_USER_ID);
+      if (otherId) return { id: otherId, name: "Utilisateur", imageURL: "" };
+    }
+
+    return { id: "unknown", name: "Utilisateur", imageURL: "" };
+  }, []);
+
+  // ============================================
+  // Search users
+  // ============================================
+  const handleSearchUsers = useCallback(async (queryText) => {
+    const trimmed = queryText.trim();
+    if (!trimmed) {
+      setSearchResults([]);
+      setShowSearchResults(false);
+      return;
+    }
+
+    setSearchLoading(true);
+    setShowSearchResults(true);
+
+    try {
+      const searchLower = trimmed.toLowerCase();
+      const usersRef = collection(db, "users");
+      const usersMap = new Map();
+      const conversationUserIds = new Set();
+
+      // 1. Search in existing conversations first (to find users we already chat with)
+      // This works even if users don't have nameLowercase/reverseNameLowercase
+      conversations.forEach((conv) => {
+        const other = getOtherUser(conv);
+        if (other && other.id && other.id !== ADMIN_USER_ID) {
+          const otherName = (other.name || "").toLowerCase();
+          // Also check if search looks like an email
+          const isEmailSearch = searchLower.includes("@");
+          if (otherName.includes(searchLower) || isEmailSearch) {
+            conversationUserIds.add(other.id);
+            // Add user from conversation data (will be enriched later if found in users collection)
+            const userData = {
+              id: other.id,
+              displayName: other.name,
+              name: other.name,
+              prenom: other.name?.split(" ")[0] || "",
+              nom: other.name?.split(" ").slice(1).join(" ") || "",
+              imageURL: other.imageURL || "",
+              photoURL: other.imageURL || "",
+            };
+            usersMap.set(other.id, userData);
+          }
+        }
+      });
+
+      // 2. Try to search in users collection by nameLowercase (if field exists)
+      let snap1 = { docs: [] };
+      try {
+        const q1 = query(
+          usersRef,
+          where("nameLowercase", ">=", searchLower),
+          where("nameLowercase", "<=", searchLower + "\uf8ff"),
+          limit(10)
+        );
+        snap1 = await getDocs(q1);
+      } catch (error) {
+        // Field might not be indexed, ignore
+        console.log("nameLowercase search failed (might not be indexed):", error);
+      }
+
+      // 3. Try to search in users collection by reverseNameLowercase (if field exists)
+      let snap2 = { docs: [] };
+      try {
+        const q2 = query(
+          usersRef,
+          where("reverseNameLowercase", ">=", searchLower),
+          where("reverseNameLowercase", "<=", searchLower + "\uf8ff"),
+          limit(10)
+        );
+        snap2 = await getDocs(q2);
+      } catch (error) {
+        // Field might not be indexed, ignore
+        console.log("reverseNameLowercase search failed (might not be indexed):", error);
+      }
+
+      // 4. Search by email if the query looks like an email
+      let snap3 = { docs: [] };
+      if (searchLower.includes("@")) {
+        try {
+          const q3 = query(
+            usersRef,
+            where("email", "==", searchLower),
+            limit(10)
+          );
+          snap3 = await getDocs(q3);
+        } catch (error) {
+          console.log("email search failed:", error);
+        }
+      }
+
+      // Merge and deduplicate results from users collection
+      [...snap1.docs, ...snap2.docs, ...snap3.docs].forEach((doc) => {
+        const userData = { id: doc.id, ...doc.data() };
+        // Skip admin user
+        if (userData.id !== ADMIN_USER_ID) {
+          usersMap.set(doc.id, userData);
+        }
+      });
+
+      // 5. For users found in conversations, fetch their full data from users collection
+      // This ensures we have complete user data even if they don't have nameLowercase fields
+      const fetchPromises = Array.from(conversationUserIds).map(async (userId) => {
+        try {
+          const userDocRef = doc(usersRef, userId);
+          const userDoc = await getDoc(userDocRef);
+          if (userDoc.exists()) {
+            const userData = { id: userDoc.id, ...userDoc.data() };
+            // Merge with existing data from conversation
+            const existing = usersMap.get(userId);
+            if (existing) {
+              // Keep conversation data but enrich with user doc data
+              usersMap.set(userId, { ...existing, ...userData });
+            } else {
+              usersMap.set(userDoc.id, userData);
+            }
+          }
+        } catch (error) {
+          console.error(`Error fetching user ${userId}:`, error);
+          // Keep the conversation data if fetch fails
+        }
+      });
+
+      await Promise.all(fetchPromises);
+
+      // 6. Additional fallback: if we have very few results, try to fetch more users
+      // and filter client-side (for users without nameLowercase fields)
+      if (usersMap.size < 5 && searchLower.length >= 3) {
+        try {
+          // Get a larger sample and filter client-side
+          const allUsersSnap = await getDocs(query(usersRef, limit(100)));
+          allUsersSnap.docs.forEach((doc) => {
+            const userData = { id: doc.id, ...doc.data() };
+            if (userData.id === ADMIN_USER_ID || usersMap.has(userData.id)) {
+              return;
+            }
+
+            // Check if name matches (various fields) or email
+            const displayName = (userData.displayName || "").toLowerCase();
+            const prenom = (userData.prenom || "").toLowerCase();
+            const nom = (userData.nom || "").toLowerCase();
+            const fullName = `${prenom} ${nom}`.trim().toLowerCase();
+            const email = (userData.email || "").toLowerCase();
+
+            if (
+              displayName.includes(searchLower) ||
+              prenom.includes(searchLower) ||
+              nom.includes(searchLower) ||
+              fullName.includes(searchLower) ||
+              email.includes(searchLower) ||
+              email === searchLower
+            ) {
+              usersMap.set(userData.id, userData);
+            }
+          });
+        } catch (error) {
+          console.error("Error in fallback search:", error);
+        }
+      }
+
+      const results = Array.from(usersMap.values());
+      setSearchResults(results);
+    } catch (error) {
+      console.error("Error searching users:", error);
+      showToast("Erreur lors de la recherche", "error");
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [conversations, getOtherUser]);
+
+  // Handle search query changes
+  useEffect(() => {
+    if (searchQuery.trim()) {
+      const timeoutId = setTimeout(() => {
+        handleSearchUsers(searchQuery);
+      }, 300); // Debounce search
+
+      return () => clearTimeout(timeoutId);
+    } else {
+      setSearchResults([]);
+      setShowSearchResults(false);
+    }
+  }, [searchQuery, handleSearchUsers]);
+
+  // ============================================
   // Send message
   // ============================================
   const handleSendMessage = async (e) => {
@@ -180,36 +405,178 @@ export default function MessageriePage() {
   };
 
   // ============================================
-  // Get other user from conversation
+  // Create chat (adapted from React Native)
   // ============================================
-  const getOtherUser = useCallback((conversation) => {
-    if (!conversation) return null;
+  const createChat = async (currentUser, otherUser) => {
+    const uidA = currentUser?.id || currentUser?.uid;
+    const uidB = otherUser?.id || otherUser?.uid;
 
-    // Try members array first
-    if (Array.isArray(conversation.members)) {
-      const other = conversation.members.find((m) => m?.id !== ADMIN_USER_ID);
-      if (other) return other;
+    if (!uidA || !uidB) {
+      throw new Error("createChat: missing user id");
+    }
+    if (uidA === uidB) {
+      throw new Error("createChat: both users are the same");
     }
 
-    // Try participantsMap
-    if (conversation.participantsMap) {
-      const otherKey = Object.keys(conversation.participantsMap).find(
-        (key) => key !== ADMIN_USER_ID
-      );
-      if (otherKey) {
-        const p = conversation.participantsMap[otherKey];
-        return { id: otherKey, name: p.name, imageURL: p.photoURL };
+    // Stable pair key allows fast equality query & prevents duplicates
+    const pair = [uidA, uidB].sort();
+    const pairKey = `${pair[0]}__${pair[1]}`;
+
+    const convsRef = collection(db, "conversations");
+
+    // 1) Fast path: direct lookup by pairKey
+    let q = query(convsRef, where("pairKey", "==", pairKey));
+    let snap = await getDocs(q);
+    let convId = null;
+
+    if (!snap.empty) {
+      convId = snap.docs[0].id;
+    } else {
+      // 2) Fallback: single array-contains then filter client-side (older docs)
+      q = query(convsRef, where("participants", "array-contains", uidA));
+      snap = await getDocs(q);
+      const existing = snap.docs.find((d) => {
+        const data = d.data();
+        const participants = Array.isArray(data?.participants)
+          ? data.participants
+          : [];
+
+        // Must be the same pair (both uids present)
+        const hasBoth = participants.includes(uidA) && participants.includes(uidB);
+
+        // Strong signals that this is a true 1-to-1
+        const flaggedTwoPerson =
+          data?.kind === "two_person" || data?.isTwoPeople === true;
+
+        // Backward-compat: older schemas may not have flags
+        const looksDirect = data?.type === "direct";
+
+        // If a pairKey exists, enforce strict match
+        const samePairKey =
+          typeof data?.pairKey === "string" && data.pairKey === pairKey;
+
+        return (
+          hasBoth &&
+          (flaggedTwoPerson || samePairKey || looksDirect)
+        );
+      });
+
+      if (existing) {
+        convId = existing.id;
+      } else {
+        // 3) Create a new conversation document
+        const now = serverTimestamp();
+
+        // Get user display names
+        const currentUserName =
+          currentUser.displayName ||
+          `${currentUser.prenom || ""} ${currentUser.nom || ""}`.trim() ||
+          "";
+        const otherUserName =
+          otherUser.displayName ||
+          `${otherUser.prenom || ""} ${otherUser.nom || ""}`.trim() ||
+          "";
+
+        const participantsMap = {
+          [uidA]: {
+            uid: uidA,
+            name: currentUserName,
+            photoURL: currentUser.imageURL || currentUser.photoURL || "",
+          },
+          [uidB]: {
+            uid: uidB,
+            name: otherUserName,
+            photoURL: otherUser.imageURL || otherUser.photoURL || "",
+          },
+        };
+
+        const newData = {
+          kind: "two_person",
+          isTwoPeople: true,
+          type: "direct",
+          participants: pair,
+          participantsMap,
+          pairKey,
+          createdAt: now,
+          updatedAt: now,
+          lastMessage: {
+            text: null,
+            createdAt: null,
+            seenBy: [],
+            senderId: null,
+          },
+          memberIds: [uidA, uidB],
+          members: [
+            {
+              id: otherUser.id || otherUser.uid || uidB,
+              frequence: otherUser.frequence || 0,
+              name: otherUserName,
+              imageURL: otherUser.imageURL || otherUser.photoURL || "",
+            },
+            {
+              id: currentUser.id || currentUser.uid || uidA,
+              frequence: currentUser.frequence || 0,
+              name: currentUserName,
+              imageURL: currentUser.imageURL || currentUser.photoURL || "",
+            },
+          ],
+        };
+
+        const newDocRef = await addDoc(convsRef, newData).catch((error) => {
+          console.log("Error creating conversation:", error);
+          throw error;
+        });
+        console.log("[createChat] Created conversation", newDocRef.id);
+        convId = newDocRef.id;
       }
     }
 
-    // Fallback to memberIds
-    if (Array.isArray(conversation.memberIds)) {
-      const otherId = conversation.memberIds.find((id) => id !== ADMIN_USER_ID);
-      if (otherId) return { id: otherId, name: "Utilisateur", imageURL: "" };
-    }
+    // Return conversation data
+    const convRef = doc(db, "conversations", convId);
+    const convSnap = await getDoc(convRef);
+    const conversation = {
+      id: convId,
+      ...(convSnap.exists ? convSnap.data() : {}),
+    };
 
-    return { id: "unknown", name: "Utilisateur", imageURL: "" };
-  }, []);
+    return { id: convId, conversation };
+  };
+
+  // ============================================
+  // Handle selecting a searched user
+  // ============================================
+  const handleSelectSearchedUser = async (user) => {
+    try {
+      setSearchLoading(true);
+
+      // Get current user data
+      const currentUser = {
+        id: ADMIN_USER_ID,
+        uid: ADMIN_USER_ID,
+        displayName: ADMIN_DISPLAY_NAME,
+        prenom: "Mathys",
+        nom: "Fornasier",
+        imageURL: "",
+        photoURL: "",
+        frequence: 0,
+      };
+
+      // Create or find conversation
+      const { conversation } = await createChat(currentUser, user);
+
+      // Update selected conversation
+      setSelectedConversation(conversation);
+      setShowChat(true);
+      setShowSearchResults(false);
+      setSearchQuery("");
+      setSearchResults([]);
+    } catch (error) {
+      console.error("Error selecting user:", error);
+      showToast("Erreur lors de la création de la conversation", "error");
+    } finally {
+      setSearchLoading(false);
+    }
+  };
 
   // ============================================
   // Format timestamp
@@ -297,6 +664,163 @@ export default function MessageriePage() {
             <p className="mt-0.5 text-xs text-slate-400">
               {conversations.length} conversation{conversations.length !== 1 ? "s" : ""}
             </p>
+          </div>
+
+          {/* Search bar */}
+          <div className="relative border-b border-slate-800 px-4 py-3">
+            <div className="relative">
+              <SearchIcon className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onFocus={() => {
+                  if (searchQuery.trim()) {
+                    setShowSearchResults(true);
+                  }
+                }}
+                placeholder="Rechercher un utilisateur..."
+                className="w-full rounded-lg border border-slate-700 bg-slate-800/50 py-2 pl-10 pr-4 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => {
+                    setSearchQuery("");
+                    setSearchResults([]);
+                    setShowSearchResults(false);
+                  }}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
+                >
+                  <CloseIcon className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+
+            {/* Search results */}
+            {showSearchResults && (
+              <div className="absolute left-0 right-0 z-50 mt-2 max-h-80 overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 shadow-lg">
+                {searchLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <SpinnerIcon className="h-5 w-5 animate-spin text-sky-500" />
+                  </div>
+                ) : searchResults.length === 0 && searchQuery.trim() ? (
+                  <div className="px-4 py-8 text-center">
+                    <p className="text-sm text-slate-400">Aucun utilisateur trouvé</p>
+                  </div>
+                ) : (
+                  searchResults.map((user) => {
+                    const userName =
+                      user.displayName ||
+                      `${user.prenom || ""} ${user.nom || ""}`.trim() ||
+                      "Utilisateur";
+                    const userImageURL = user.imageURL || user.photoURL || "";
+
+                    // Check if conversation already exists (same logic as createChat)
+                    const userId = user.id || user.uid;
+                    const existingConv = conversations.find((conv) => {
+                      // Check by pairKey first (most reliable)
+                      const pair = [ADMIN_USER_ID, userId].sort();
+                      const pairKey = `${pair[0]}__${pair[1]}`;
+                      if (conv.pairKey === pairKey) {
+                        return true;
+                      }
+
+                      // Check by memberIds (both users must be present)
+                      if (Array.isArray(conv.memberIds)) {
+                        const hasBoth =
+                          conv.memberIds.includes(ADMIN_USER_ID) &&
+                          conv.memberIds.includes(userId);
+                        if (hasBoth) {
+                          // Additional check: should be a two-person conversation
+                          const isTwoPerson =
+                            conv.kind === "two_person" ||
+                            conv.isTwoPeople === true ||
+                            conv.type === "direct";
+                          if (isTwoPerson) {
+                            return true;
+                          }
+                        }
+                      }
+
+                      // Check by participants array
+                      if (Array.isArray(conv.participants)) {
+                        const hasBoth =
+                          conv.participants.includes(ADMIN_USER_ID) &&
+                          conv.participants.includes(userId);
+                        if (hasBoth) {
+                          const isTwoPerson =
+                            conv.kind === "two_person" ||
+                            conv.isTwoPeople === true ||
+                            conv.type === "direct";
+                          if (isTwoPerson) {
+                            return true;
+                          }
+                        }
+                      }
+
+                      return false;
+                    });
+
+                    return (
+                      <button
+                        key={user.id}
+                        onClick={() => {
+                          if (existingConv) {
+                            selectConversation(existingConv);
+                            setShowSearchResults(false);
+                            setSearchQuery("");
+                            setSearchResults([]);
+                          } else {
+                            handleSelectSearchedUser(user);
+                          }
+                        }}
+                        className="flex w-full items-center gap-3 border-b border-slate-800/50 px-4 py-3 text-left transition-colors hover:bg-slate-800/50 last:border-b-0"
+                      >
+                        {/* Avatar */}
+                        <div className="relative flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-slate-700">
+                          {userImageURL ? (
+                            <img
+                              src={userImageURL}
+                              alt={userName}
+                              className="h-full w-full rounded-full object-cover"
+                              onError={(e) => {
+                                e.target.style.display = "none";
+                                e.target.nextSibling.style.display = "flex";
+                              }}
+                            />
+                          ) : null}
+                          <span
+                            className={`text-xs font-semibold ${userImageURL ? "hidden" : ""}`}
+                            style={{ display: userImageURL ? "none" : "flex" }}
+                          >
+                            {getInitials(userName)}
+                          </span>
+                        </div>
+
+                        {/* Info */}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate text-sm font-medium text-slate-100">
+                              {userName}
+                            </span>
+                            {existingConv && (
+                              <span className="flex-shrink-0 text-[10px] text-sky-400">
+                                Existe
+                              </span>
+                            )}
+                          </div>
+                          {user.email && (
+                            <p className="mt-0.5 truncate text-xs text-slate-400">
+                              {user.email}
+                            </p>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
           </div>
 
           {/* Conversation list */}
@@ -590,4 +1114,41 @@ function SpinnerIcon({ className }) {
     </svg>
   );
 }
+
+function SearchIcon({ className }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.35-4.35" />
+    </svg>
+  );
+}
+
+function CloseIcon({ className }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+
+
 

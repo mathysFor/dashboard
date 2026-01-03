@@ -47,6 +47,58 @@ export default function VideosPage() {
   const [deletingId, setDeletingId] = useState(null);
   const [exportingAll, setExportingAll] = useState(false);
 
+  // Sort mode
+  const [sortBy, setSortBy] = useState("date"); // "date" or "likes"
+
+  // ============================================
+  // Filter challenges: active + last finished
+  // ============================================
+  const filterRelevantChallenges = (challengesList) => {
+    const now = new Date();
+    
+    // Separate active and finished challenges
+    const activeChallenges = challengesList.filter(
+      (challenge) => challenge.status === "active"
+    );
+    
+    const finishedChallenges = challengesList
+      .filter((challenge) => {
+        // Check if challenge is finished (deadline < now)
+        if (!challenge.deadline) return false;
+        
+        const deadlineDate = challenge.deadline.toDate
+          ? challenge.deadline.toDate()
+          : new Date(challenge.deadline);
+        
+        return deadlineDate < now;
+      })
+      .sort((a, b) => {
+        // Sort by deadline descending (most recent first)
+        const deadlineA = a.deadline.toDate
+          ? a.deadline.toDate()
+          : new Date(a.deadline);
+        const deadlineB = b.deadline.toDate
+          ? b.deadline.toDate()
+          : new Date(b.deadline);
+        return deadlineB.getTime() - deadlineA.getTime();
+      });
+    
+    // Get the most recent finished challenge (first in sorted array)
+    const lastFinishedChallenge =
+      finishedChallenges.length > 0 ? [finishedChallenges[0]] : [];
+    
+    // Combine active challenges + last finished challenge
+    const relevantChallenges = [...activeChallenges, ...lastFinishedChallenge];
+    
+    // Remove duplicates (in case a challenge is both active and the last finished)
+    const uniqueChallenges = relevantChallenges.filter(
+      (challenge, index, self) =>
+        index === self.findIndex((c) => c.id === challenge.id)
+    );
+    
+    return uniqueChallenges;
+  };
+
   // ============================================
   // Load all challenges on mount
   // ============================================
@@ -61,7 +113,10 @@ export default function VideosPage() {
           id: doc.id,
           ...doc.data(),
         }));
-        setChallenges(challengesList);
+        
+        // Filter to show only active challenges + last finished challenge
+        const filteredChallenges = filterRelevantChallenges(challengesList);
+        setChallenges(filteredChallenges);
       } catch (error) {
         console.error("Error loading challenges:", error);
         showToast("Erreur lors du chargement des challenges", "error");
@@ -92,9 +147,25 @@ export default function VideosPage() {
         )
       );
 
-      const postsList = postsSnap.docs
+      let postsList = postsSnap.docs
         .map((doc) => ({ id: doc.id, challengeId, ...doc.data() }))
         .filter((post) => post.type === "video");
+
+      // Apply sorting based on sortBy mode
+      if (sortBy === "likes") {
+        postsList = [...postsList].sort((a, b) => {
+          const likesA = a.likesCount || 0;
+          const likesB = b.likesCount || 0;
+          return likesB - likesA; // Descending order (most likes first)
+        });
+      } else {
+        // Default: sort by date (already sorted by createdAt desc from query)
+        postsList = [...postsList].sort((a, b) => {
+          const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
+          const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
+          return dateB.getTime() - dateA.getTime(); // Descending order (newest first)
+        });
+      }
 
       setPosts(postsList);
 
@@ -108,7 +179,7 @@ export default function VideosPage() {
     } finally {
       setPostsLoading(false);
     }
-  }, []);
+  }, [sortBy]);
 
   useEffect(() => {
     if (selectedChallengeId) {
@@ -120,7 +191,7 @@ export default function VideosPage() {
       setPosts([]);
       setStats({ total: 0, participants: 0, ready: 0 });
     }
-  }, [selectedChallengeId, challenges, loadPosts]);
+  }, [selectedChallengeId, challenges, loadPosts, sortBy]);
 
   // ============================================
   // Toast helper
@@ -504,6 +575,39 @@ export default function VideosPage() {
     return colors[status] || "bg-slate-500/20 text-slate-400";
   };
 
+  // Check if challenge is finished
+  const isChallengeFinished = (challenge) => {
+    if (!challenge.deadline) return false;
+    const now = new Date();
+    const deadlineDate = challenge.deadline.toDate
+      ? challenge.deadline.toDate()
+      : new Date(challenge.deadline);
+    return deadlineDate < now;
+  };
+
+  // Format deadline date
+  const formatDeadlineDate = (challenge) => {
+    if (!challenge.deadline) return "";
+    const deadlineDate = challenge.deadline.toDate
+      ? challenge.deadline.toDate()
+      : new Date(challenge.deadline);
+    return deadlineDate.toLocaleDateString("fr-FR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+  };
+
+  // Get challenge display text with badge and date
+  const getChallengeDisplayText = (challenge) => {
+    const title = challenge.title || challenge.name || challenge.id;
+    const isFinished = isChallengeFinished(challenge);
+    const dateStr = formatDeadlineDate(challenge);
+    const badge = isFinished ? " [Terminé]" : " [En cours]";
+    const dateInfo = dateStr ? ` - ${dateStr}` : "";
+    return `${title}${badge}${dateInfo}`;
+  };
+
   return (
     <AuthGuard>
       <div className="text-slate-50">
@@ -521,6 +625,27 @@ export default function VideosPage() {
 
             {/* Actions */}
             <div className="flex gap-2">
+              <button
+                onClick={() => setSortBy(sortBy === "date" ? "likes" : "date")}
+                disabled={!selectedChallengeId || postsLoading}
+                className={`flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
+                  sortBy === "likes"
+                    ? "border-sky-500 bg-sky-500/20 text-sky-400 hover:bg-sky-500/30"
+                    : "border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700"
+                }`}
+              >
+                {sortBy === "likes" ? (
+                  <>
+                    <HeartIcon className="h-4 w-4" />
+                    Tri par likes
+                  </>
+                ) : (
+                  <>
+                    <CalendarIcon className="h-4 w-4" />
+                    Tri par date
+                  </>
+                )}
+              </button>
               <button
                 onClick={() => loadPosts(selectedChallengeId)}
                 disabled={!selectedChallengeId || postsLoading}
@@ -560,7 +685,7 @@ export default function VideosPage() {
               </option>
               {challenges.map((challenge) => (
                 <option key={challenge.id} value={challenge.id}>
-                  {challenge.title || challenge.name || challenge.id} ({challenge.status || "N/A"})
+                  {getChallengeDisplayText(challenge)}
                 </option>
               ))}
             </select>
@@ -723,6 +848,14 @@ function VideoCard({
         >
           {getStatusLabel(post.uploadStatus)}
         </span>
+
+        {/* Likes badge */}
+        <div className="absolute right-2 top-2 flex items-center gap-1 rounded-full bg-black/60 px-2 py-1 backdrop-blur-sm">
+          <HeartIcon className="h-3 w-3 text-white" />
+          <span className="text-[10px] font-semibold text-white">
+            {post.likesCount || 0}
+          </span>
+        </div>
       </div>
 
       {/* Info */}
@@ -907,6 +1040,41 @@ function SpinnerIcon({ className }) {
         fill="currentColor"
         d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
       />
+    </svg>
+  );
+}
+
+function HeartIcon({ className }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+    </svg>
+  );
+}
+
+function CalendarIcon({ className }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+      <line x1="16" y1="2" x2="16" y2="6" />
+      <line x1="8" y1="2" x2="8" y2="6" />
+      <line x1="3" y1="10" x2="21" y2="10" />
     </svg>
   );
 }
